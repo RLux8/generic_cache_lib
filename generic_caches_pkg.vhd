@@ -19,6 +19,8 @@ PACKAGE generic_caches IS
     type cache_T is (DIMA_WRBA, DIMA_WRTH);
     type arbitration_mode_T is (ROUND_ROBIN);
 
+    type ctrl_mode_T is (nop, flush, inval);
+
     constant ADDR_WIDTH: positive := 64;
     constant BUS_WIDTH: positive := 256;
     constant BYTE_SIZE: positive := 8;

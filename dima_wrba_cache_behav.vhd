@@ -1,53 +1,45 @@
---
--- VHDL Architecture better_generic_cache_lib.dima_wrba_cache.behav
---
--- Created:
---          by - rbnlux.ckoehler (pc023)
---          at - 11:03:55 01/16/25
---
--- using Mentor Graphics HDL Designer(TM) 2022.3 Built on 14 Jul 2022 at 13:56:12
---
 LIBRARY ieee;
 USE ieee.std_logic_1164.all;
 use IEEE.math_real.all;
 use ieee.numeric_std.all;
 
-
 LIBRARY better_generic_cache_lib;
 USE better_generic_cache_lib.generic_caches.all;
-
 
 ENTITY dima_wrba_cache IS
     GENERIC(
         WORDS_IN_LINE: positive := 8;
         LINES: positive := 8;
         DATA_WIDTH: positive := 32;
-        BACKGROUND_FLUSHES: boolean := false
+
+        BACKGROUND_FLUSHES: boolean := false;
+        REPORT_IF_MISUSE: boolean := true;
     );
     PORT(
         clk, res_n              : IN std_logic;
+
+        -- pipeline interface
         addr                    : IN std_logic_vector(ADDR_WIDTH - 1 downto 0);
         next_addr               : IN std_logic_vector(ADDR_WIDTH - 1 downto 0);
         byte_ena                : IN std_logic_vector(DATA_WIDTH/8 - 1 downto 0) := (others => '1');
         we                      : IN boolean := false;
         rd                      : IN boolean := true;
 
-
-        flush                   : IN boolean := false;
-        inval                   : IN boolean := false;
-
-        iffault                 : OUT boolean;
-        
-        flush_active            : OUT boolean;
-        flush_start             : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '0');
-        flush_end               : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '1');
-
-
         sd                      : IN std_logic_vector(DATA_WIDTH - 1 downto 0) := (others => '0');
         ld                      : OUT std_logic_vector(DATA_WIDTH - 1 downto 0);
         stall                   : OUT boolean;
         
-        
+
+        -- management interface
+        mgm_ctrl                : IN ctrl_mode_T;
+        mgm_start               : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '0');
+        mgm_end                 : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '1');
+        mgm_active              : OUT boolean;
+
+        iffault                 : OUT boolean;
+
+
+        -- memory interface
         rreq                    : OUT boolean;
         rack                    : IN boolean;
         raddr                   : OUT std_logic_vector(ADDR_WIDTH - 1 downto 0);
@@ -96,6 +88,8 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     -- cache line memory in/out signals
     type row_selected_bytes_T is array(BYTES_IN_LINE - 1 downto 0) of byte_T;
     constant NULL_ROW_SEL_BYTES: row_selected_bytes_T := (others => (others => '0'));
+
+    constant USE_EXPLICIT_MEMORY_UNITS: boolean := true;
 
 
     -- === The following ranges are used to extract the relevant bits of the address for various tasks ====
@@ -180,19 +174,19 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     signal stall_int: boolean;
 
     signal pipe_core_in: core_in_signals_T;
-    signal flush_core_in: core_in_signals_T;
+    signal mgm_core_in: core_in_signals_T;
     signal fill_core_in: core_in_signals_T;
 
     -- subunit activation signals
     signal start_fill: boolean;
-    signal start_flush: boolean;
+    signal start_mgm_op: boolean;
     signal start_writeback: boolean;
     signal req_writeback: boolean;
 
     -- subunit status signals
-    signal flush_busy: boolean;
+    signal mgm_busy: boolean;
     signal fill_busy: boolean;
-    signal flush_stall: boolean;
+    signal mgm_stall: boolean;
     signal writeback_busy: boolean;
     signal writeback_busy_q: boolean;
 
@@ -233,14 +227,14 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     signal next_line_writeback_ctr: natural range 0 to BUS_WORDS_PER_LINE + 1;
 
     -- ==== FLUSH ==== 
-    type flush_state_T is (RESET, IDLE, WAIT_STORE, WAITS, SCANNING, RESTORE_PIPE_ADDR, DONE);
-    signal line_in_flush_range: boolean;
-    signal flush_state: flush_state_T;
-    signal flush_line_ix: line_addr_log_T;
-    signal next_flush_line_ix: line_addr_log_T;
-    signal flush_wait_release: boolean;
+    type mgm_state_T is (RESET, IDLE, WAIT_STORE, WAITS, ITERATING, RESTORE_PIPE_ADDR, DONE);
+    signal line_in_mgm_range: boolean;
+    signal mgm_state: mgm_state_T;
+    signal mgm_line_ix: line_addr_log_T;
+    signal next_mgm_line_ix: line_addr_log_T;
+    signal mgmt_wait_release: boolean;
     signal start_end_same_tag: boolean;
-    signal flush_line: std_logic_vector(LINES_LOG - 1 downto 0);
+    signal mgm_line: std_logic_vector(LINES_LOG - 1 downto 0);
     signal in_locked_range: boolean;
     signal probe_line: line_addr_log_T;
     signal probed_mgmt: mgmt_vector_T;
@@ -272,103 +266,108 @@ BEGIN
 --      ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝    
                                      
 
-save_cdata <= save_core_data;
-    --core_memory_p: process(clk, res_n) is
-    --begin
-    --    if clk'event and clk = '1' then
-    --        last_core_rd_addr <= core_in_signals.rd_addr;
-    --        last_core_mgmt_addr <= core_in_signals.mgmt_addr;
---
-    --        -- mgmt data is special as in it can only be either read or written via the core in signals
-    --        if core_in_signals.mgmt_wr = '1' then
-    --            core_mgmt_memory(to_integer(unsigned(core_in_signals.mgmt_addr))) <= core_in_signals.mgmt_data;
-    --        end if;
---
-    --        if core_in_signals.dirties_wr = '1' then
-    --            core_dirties_memory(to_integer(unsigned(core_in_signals.wr_addr))) <= core_in_signals.dirties;
-    --        end if;
---
-    --        --probe
---
-    --        if not isAllStd(core_in_signals.line_bens, '0') then
-    --            core_memory(to_integer(unsigned(core_in_signals.wr_addr))) <= core_wdata;
-    --        end if;
-    --    end if;
-    --end process core_memory_p;
---
-    --core_rmgmt <= core_mgmt_memory(to_integer(unsigned(last_core_mgmt_addr)));
-    --core_rdata <= core_memory(to_integer(unsigned(last_core_rd_addr)));
-    --core_rdirties <= core_dirties_memory(to_integer(unsigned(last_core_rd_addr)));
     
-    --wr_line <= core_in_signals.wr_addr(3 downto 0);
-    --rd_line <= core_in_signals.rd_addr(3 downto 0);
-    --mgm_line <= core_in_signals.mgmt_addr(3 downto 0);
-    --bens <= core_in_signals.line_bens;
+    icore_mem_units: if USE_EXPLICIT_MEMORY_UNITS generate
+        imgmt_mem: simple_dual_port_ram
+            GENERIC MAP(
+                ADDR_WIDTH => LINES_LOG,
+                DATA_WIDTH => mgmt_vector_T'length
+            ) 
+            PORT MAP(
+                clk => clk,
 
-    imgmt_mem: simple_dual_port_ram
-        GENERIC MAP(
-            ADDR_WIDTH => LINES_LOG,
-            DATA_WIDTH => mgmt_vector_T'length
-        ) 
-        PORT MAP(
-            clk => clk,
+                we => core_in_signals.mgmt_wr,
+                waddr => core_in_signals.mgmt_addr,
+                wdata => core_in_signals.mgmt_data,
 
-            we => core_in_signals.mgmt_wr,
-            waddr => core_in_signals.mgmt_addr,
-            wdata => core_in_signals.mgmt_data,
-
-            raddr => core_in_signals.mgmt_addr,
-            rdata => core_rmgmt
-        );
+                raddr => core_in_signals.mgmt_addr,
+                rdata => core_rmgmt
+            );
 
 
 
-    idirties_mem: simple_dual_port_ram
-        GENERIC MAP(
-            ADDR_WIDTH => LINES_LOG,
-            DATA_WIDTH => 64 --//TODO: via constant
-        ) 
-        PORT MAP(
-            clk => clk,
-            
-            we => core_in_signals.dirties_wr,
-            waddr => core_in_signals.wr_addr,
-            wdata => core_in_signals.dirties,
+        idirties_mem: simple_dual_port_ram
+            GENERIC MAP(
+                ADDR_WIDTH => LINES_LOG,
+                DATA_WIDTH => BYTES_IN_LINE
+            ) 
+            PORT MAP(
+                clk => clk,
+                
+                we => core_in_signals.dirties_wr,
+                waddr => core_in_signals.wr_addr,
+                wdata => core_in_signals.dirties,
 
-            raddr => core_in_signals.rd_addr,
-            rdata => core_rdirties
-        );
+                raddr => core_in_signals.rd_addr,
+                rdata => core_rdirties
+            );
 
-    idata_mem: for byi in core_wdata'range generate 
-    begin
-        ibyte_mem: simple_dual_port_ram
-        GENERIC MAP(
-            ADDR_WIDTH => LINES_LOG,
-            DATA_WIDTH => byte_T'length
-        ) 
-        PORT MAP(
-            clk => clk,
-            
-            we => core_in_signals.line_bens(byi),
-            waddr => core_in_signals.wr_addr,
-            wdata => core_in_signals.line_wdata(byi),
+        idata_mem: for byi in core_wdata'range generate 
+        begin
+            ibyte_mem: simple_dual_port_ram
+            GENERIC MAP(
+                ADDR_WIDTH => LINES_LOG,
+                DATA_WIDTH => byte_T'length
+            ) 
+            PORT MAP(
+                clk => clk,
+                
+                we => core_in_signals.line_bens(byi),
+                waddr => core_in_signals.wr_addr,
+                wdata => core_in_signals.line_wdata(byi),
 
-            raddr => core_in_signals.rd_addr,
-            rdata => core_rdata(byi)
-        );
-    end generate;
+                raddr => core_in_signals.rd_addr,
+                rdata => core_rdata(byi)
+            );
+        end generate;
 
 
-    core_memory_bena_p: process(all) is
-    begin
-        core_wdata <= core_rdata;
-        for i in core_in_signals.line_bens'range loop
-            --if core_in_signals.line_bens(i) = '1' then
+        core_memory_bena_p: process(all) is
+        begin
+            core_wdata <= core_rdata;
+            for i in core_in_signals.line_bens'range loop
                 core_wdata(i) <= core_in_signals.line_wdata(i);
-            --end if;
-        end loop;
-    end process core_memory_bena_p;
+            end loop;
+        end process core_memory_bena_p;
+    else generate
+        core_memory_p: process(clk, res_n) is
+        begin
+            if clk'event and clk = '1' then
+                last_core_rd_addr <= core_in_signals.rd_addr;
+                last_core_mgmt_addr <= core_in_signals.mgmt_addr;
 
+                -- mgmt data is special as in it can only be either read or written via the core in signals
+                if core_in_signals.mgmt_wr = '1' then
+                    core_mgmt_memory(to_integer(unsigned(core_in_signals.mgmt_addr))) <= core_in_signals.mgmt_data;
+                end if;
+
+                if core_in_signals.dirties_wr = '1' then
+                    core_dirties_memory(to_integer(unsigned(core_in_signals.wr_addr))) <= core_in_signals.dirties;
+                end if;
+
+                --probe
+
+                if not isAllStd(core_in_signals.line_bens, '0') then
+                    core_memory(to_integer(unsigned(core_in_signals.wr_addr))) <= core_wdata;
+                end if;
+            end if;
+        end process core_memory_p;
+        core_rmgmt <= core_mgmt_memory(to_integer(unsigned(last_core_mgmt_addr)));
+        core_rdata <= core_memory(to_integer(unsigned(last_core_rd_addr)));
+        core_rdirties <= core_dirties_memory(to_integer(unsigned(last_core_rd_addr)));
+
+
+        core_memory_bena_p: process(all) is
+        begin
+            core_wdata <= core_rdata;
+            for i in core_in_signals.line_bens'range loop
+                if core_in_signals.line_bens(i) = '1' then
+                    core_wdata(i) <= core_in_signals.line_wdata(i);
+                end if;
+            end loop;
+        end process core_memory_bena_p;
+    end generate;
+    
     debug_flineout_p: process(all) is
         begin
             for i in 7 downto 0 loop 
@@ -398,7 +397,7 @@ save_cdata <= save_core_data;
         core_access         <= PIPELINE;
         start_writeback     <= false;
         start_fill          <= false;
-        start_flush         <= false;
+        start_mgm_op         <= false;
         internal_stall      := false;
 		writeback_line		<= (others => '0');
         stall_int           <= false;
@@ -407,7 +406,25 @@ save_cdata <= save_core_data;
         if fill_busy then
             core_access <= FILLU;
             writeback_line <= pipe_line;
-        elsif not line_hit and (rd or we) then 
+        else
+            case ctrl is
+                when rd | wr | rdwr => 
+                    if not line_hit then
+                        internal_stall := true;
+
+                        if line_is_dirty and line_valid = '1' then
+                            start_writeback <= true;
+                        end if;
+
+                        writeback_line <= pipe_line;
+                        core_access <= FILLU;
+                        start_fill <= true;
+                    end if;
+
+                when flush =>  
+            end case;
+        end if;
+        elsif not line_hit and (ctrl = rd or ctrl = wr or ctrl = rdwr) then 
             internal_stall := true;
 
             if line_is_dirty and line_valid = '1' then
@@ -417,50 +434,23 @@ save_cdata <= save_core_data;
             writeback_line <= pipe_line;
             core_access <= FILLU;
             start_fill <= true;
-        elsif ((flush and not flush_wait_release) or flush_busy) then 
+        elsif ((mgm_ctrl /= nop and not mgmt_wait_release) or mgm_busy) then 
             core_access <= FLUSHU;
-            start_flush <= true;
-            internal_stall := not flush_wait_release;
-            writeback_line <= flush_line;
+            start_mgm_op <= true;
+            internal_stall := not mgmt_wait_release;
+            writeback_line <= mgm_line;
             if req_writeback then
                 start_writeback <= true;
             end if;
         end if;
 
-        --if ((flush and not flush_wait_release) or flush_busy) and not fill_busy then
-        --    core_access <= FLUSHU;
-        --    start_flush <= true;
-        --    internal_stall := not flush_wait_release;
-        --    writeback_line <= flush_line;
-        --    if req_writeback then
-        --        start_writeback <= true;
-        --    end if;
-        --else
-        --    if fill_busy then
-        --        core_access <= FILLU;
-        --        writeback_line <= pipe_line;
-        --    elsif not line_hit and (rd or we)  then
-        --        internal_stall := true;
---
-        --        if line_is_dirty and line_valid = '1' then
-        --            start_writeback <= true;
-        --        end if;
---
-        --        writeback_line <= pipe_line;
-        --        core_access <= FILLU;
-        --        start_fill <= true;
-        --    end if;
-        --end if;
-
-        -- if one of the units is busy or will be busy (internal stall) 
-        -- and also if the flush unit was busy to be able to provide next_addr to core
-        stall_int <= (flush_busy or flush_stall or fill_busy or writeback_busy_q) or internal_stall or if_misuse_stall;
+        stall_int <= (mgm_busy or mgm_stall or fill_busy or writeback_busy_q) or internal_stall or if_misuse_stall;
     end process core_control_p;
     stall <= stall_int;
 
 
     core_in_signals <= pipe_core_in when core_access = PIPELINE else
-                       flush_core_in when core_access = FLUSHU else
+                       mgm_core_in when core_access = FLUSHU else
                        fill_core_in when core_access = FILLU else
                        ZERO_CORE_IN;
 
@@ -523,26 +513,31 @@ save_cdata <= save_core_data;
 
     pipe_line <= ADDR(LINE_RANGE);
 
+    imaybe_if_check: if REPORT_IF_MISUSE generate
+        if_check_p: process(clk, res_n) is
+            variable last_ix: std_logic_vector(LINE_RANGE);
+            variable startup: boolean;
+        begin
+            if res_n /= '1' then
+                if_misuse_stall <= false;
+                last_ix := (others => '0');
+                startup := true;
+            else
+                if (clk'event and clk = '1') then  
+                    if (last_ix /= addr(LINE_RANGE) and (xtrl = rd or ctrl = wr or ctrl = rdwr)) and not startup then
+                        if_misuse_stall <= true;
+                        assert false report "bad processor interface input" severity failure;
+                    end if;
 
-    if_check_p: process(clk, res_n) is
-        variable last_ix: std_logic_vector(LINE_RANGE);
-        variable startup: boolean;
-    begin
-        if res_n /= '1' then
-            if_misuse_stall <= false;
-            last_ix := (others => '0');
-            startup := true;
-        else
-            if (clk'event and clk = '1') then  
-                if (last_ix /= addr(LINE_RANGE) and (rd or we)) and not startup then
-                    if_misuse_stall <= true;
+                    last_ix := next_addr(LINE_RANGE);
+                    startup := false;
                 end if;
-
-                last_ix := next_addr(LINE_RANGE);
-                startup := false;
             end if;
-        end if;
-    end process if_check_p;
+        end process if_check_p;
+        
+    else generate;
+        if_misuse_stall <= false;
+    end generate;
     iffault <= if_misuse_stall;
 
     if_check_g : if DEBUG_MODE generate
@@ -790,9 +785,6 @@ end process fill_unit_output_p;
             used_core_rdirties <= saved_core_dirties;
         end if;
     end process core_wb_sel_p;
-    --used_core_mgmt      <= core_rmgmt when save_core_data else saved_core_mgmt;
-    --used_core_rdata     <= core_rdata when save_core_data else saved_core_rdata;
-    --used_core_rdirties  <= core_rdirties when save_core_data else saved_core_dirties;
 
     bus_word_dirty <= not isAllStd(wbyte_ena_int, '0');
     wbyte_ena <= wbyte_ena_int;
@@ -831,8 +823,6 @@ end process fill_unit_output_p;
             waddr <= line_tag & used_writeback_line & std_logic_vector(to_unsigned(used_line_writeback_ctr, WORDS_IN_LINE_LOG - WORDS_PER_BUS_LOG)) & ZERO_BYTE_ADDR & ZERO_BUS_ADDR;
         else
             waddr <= line_tag & used_writeback_line & std_logic_vector(to_unsigned(used_line_writeback_ctr, WORDS_IN_LINE_LOG - WORDS_PER_BUS_LOG)) & ZERO_BYTE_ADDR & ZERO_BUS_ADDR;
-            --//TODO update this
-            --waddr <= line_tag & addr(addr'left downto LINE_RANGE'right + Q_LOG) & ZERO_BYTE_ADDR & ZERO_BUS_ADDR;
         end if;
         
         
@@ -875,7 +865,6 @@ end process fill_unit_output_p;
                     writeback_busy <= true;
                     save_core_data <= true;
                     if bus_word_dirty then
-                        --wbyte_ena <= wbyte_ena_int;
                         wreq <= true;
                     end if;
                 end if;
@@ -884,7 +873,6 @@ end process fill_unit_output_p;
                 writeback_busy      <= true;
                 writeback_busy_q    <= true;
                 if bus_word_dirty and not (line_writeback_ctr = BUS_WORDS_PER_LINE - 1 and wack) then
-                    --wbyte_ena <= wbyte_ena_int;
                     wreq <= true;
                 end if;
         end case;
@@ -902,150 +890,154 @@ end process fill_unit_output_p;
 --    ╚═╝     ╚══════╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝
                                              
 
-    flush_unit_state_p: process(clk, res_n) is
+    mgm_unit_state_p: process(clk, res_n) is
     begin
         if res_n /= '1' then
-            flush_state <= RESET;
-            flush_line_ix <= (others => '0');
+            mgm_state <= RESET;
+            mgm_line_ix <= (others => '0');
         else
             if clk'event and clk = '1' then
-                case flush_state is
+                case mgm_state is
                     when RESET => 
-                        if unsigned(flush_line_ix) = LINES - 1 then
-                            flush_state <= WAITS;
+                        if unsigned(mgm_line_ix) = LINES - 1 then
+                            mgm_state <= WAITS;
                         else
-                            flush_line_ix <= next_flush_line_ix;
+                            mgm_line_ix <= next_mgm_line_ix;
                         end if;
                     when WAITS => 
-                        flush_state <= IDLE;
-                        flush_line_ix <= (others => '0');
+                        mgm_state <= IDLE;
+                        mgm_line_ix <= (others => '0');
 
                     when IDLE => 
-                        if start_flush then
+                        if start_mgm_op then
                             if we then 
-                                flush_state <= WAIT_STORE;
+                                mgm_state <= WAIT_STORE;
                             else
-                                flush_state <= SCANNING;
+                                mgm_state <= ITERATING;
                             end if;
                         end if;
                     when WAIT_STORE => 
-                        flush_state <= SCANNING; 
+                        mgm_state <= ITERATING; 
 
-                    when SCANNING => 
+                    when ITERATING => 
                         if not writeback_busy then
-                            if not start_end_same_tag and unsigned(flush_line_ix) = LINES - 1 then
-                                flush_state <= RESTORE_PIPE_ADDR;
-                                flush_line_ix <= (others => '0');
-                            elsif start_end_same_tag and flush_line_ix = flush_end(LINE_RANGE) then
-                                flush_state <= RESTORE_PIPE_ADDR;
-                                flush_line_ix <= (others => '0');
+                            if not start_end_same_tag and unsigned(mgm_line_ix) = LINES - 1 then
+                                mgm_state <= RESTORE_PIPE_ADDR;
+                                mgm_line_ix <= (others => '0');
+                            elsif start_end_same_tag and mgm_line_ix = mgm_end(LINE_RANGE) then
+                                mgm_state <= RESTORE_PIPE_ADDR;
+                                mgm_line_ix <= (others => '0');
                             else
-                                flush_line_ix <= next_flush_line_ix;
+                                mgm_line_ix <= next_mgm_line_ix;
                             end if;
                         end if;
                     when RESTORE_PIPE_ADDR => 
-                        flush_state <= DONE;
+                        mgm_state <= DONE;
                     when DONE => 
                         if not flush then
-                            flush_state <= IDLE;
+                            mgm_state <= IDLE;
                         end if;
                 end case;
             end if;
         end if;
-    end process flush_unit_state_p;
+    end process mgm_unit_state_p;
 
-    line_in_flush_range <= to_integer(unsigned(line_tag_selected)) >= to_integer(unsigned(flush_start(TAG_RANGE)))
-                       and to_integer(unsigned(line_tag_selected)) <= to_integer(unsigned(flush_end(TAG_RANGE)))
-                       and to_integer(unsigned(core_in_signals.wr_addr)) >= to_integer(unsigned(flush_start(LINE_RANGE)))
-                       and to_integer(unsigned(core_in_signals.wr_addr)) <= to_integer(unsigned(flush_end(LINE_RANGE)));
+    line_in_mgm_range <= to_integer(unsigned(line_tag_selected)) >= to_integer(unsigned(mgm_start(TAG_RANGE)))
+                       and to_integer(unsigned(line_tag_selected)) <= to_integer(unsigned(mgm_end(TAG_RANGE)))
+                       and to_integer(unsigned(mgm_core_in.wr_addr)) >= to_integer(unsigned(mgm_start(LINE_RANGE)))
+                       and to_integer(unsigned(mgm_core_in.wr_addr)) <= to_integer(unsigned(mgm_end(LINE_RANGE)));
 
-    in_locked_range <= to_integer(unsigned(addr(TAG_RANGE))) >= to_integer(unsigned(flush_start(TAG_RANGE)))
-               and to_integer(unsigned(addr(TAG_RANGE))) <= to_integer(unsigned(flush_end(TAG_RANGE)))
-               and to_integer(unsigned(addr(LINE_RANGE))) >= to_integer(unsigned(flush_start(LINE_RANGE)))
-               and to_integer(unsigned(addr(LINE_RANGE))) <= to_integer(unsigned(flush_end(LINE_RANGE)));
+    in_locked_range <= to_integer(unsigned(addr(TAG_RANGE))) >= to_integer(unsigned(mgm_start(TAG_RANGE)))
+               and to_integer(unsigned(addr(TAG_RANGE))) <= to_integer(unsigned(mgm_end(TAG_RANGE)))
+               and to_integer(unsigned(addr(LINE_RANGE))) >= to_integer(unsigned(mgm_start(LINE_RANGE)))
+               and to_integer(unsigned(addr(LINE_RANGE))) <= to_integer(unsigned(mgm_end(LINE_RANGE)));
                
-    start_end_same_tag <= flush_start(TAG_RANGE) = flush_end(TAG_RANGE);
-    flush_active <= flush_busy;
+    start_end_same_tag <= mgm_start(TAG_RANGE) = mgm_end(TAG_RANGE);
+    mgm_active <= mgm_busy;
 
-    flush_unit_output_p: process(all) is
-        variable next_flush_line_ix_int: line_addr_log_T;
+    mgm_unit_output_p: process(all) is
+        variable next_mgm_line_ix_int: line_addr_log_T;
+
+        variable started_cleaning: boolean;
     begin
-        flush_busy <= true;
-        flush_stall <= false;
+        mgm_busy <= true;
+        mgm_stall <= false;
         req_writeback <= false;
-        flush_wait_release <= false;
+        mgmt_wait_release <= false;
 
-        flush_core_in <= ZERO_CORE_IN;
+        mgm_core_in <= ZERO_CORE_IN;
         
-        next_flush_line_ix_int := std_logic_vector(unsigned(flush_line_ix) + 1);
+        next_mgm_line_ix_int := std_logic_vector(unsigned(mgm_line_ix) + 1);
 
-        case flush_state is
+        case mgm_state is
             when RESET => 
-                flush_core_in.wr_addr <= flush_line_ix;
-                flush_core_in.mgmt_addr <= flush_line_ix;
-                flush_core_in.mgmt_wr <= '1';
-                flush_core_in.dirties_wr <= '1';
+                mgm_core_in.wr_addr <= mgm_line_ix;
+                mgm_core_in.mgmt_addr <= mgm_line_ix;
+                mgm_core_in.mgmt_wr <= '1';
+                mgm_core_in.dirties_wr <= '1';
                 
             
             when WAITS => null; -- make sure our invalidation went through before we resume regular pipeline operation
 
             when WAIT_STORE => 
                 if start_end_same_tag then
-                    flush_core_in.rd_addr <= flush_start(LINE_RANGE);
+                    mgm_core_in.rd_addr <= mgm_start(LINE_RANGE);
                 else
-                    flush_core_in.rd_addr <= flush_line_ix;
+                    mgm_core_in.rd_addr <= mgm_line_ix;
                 end if;
 
                 
-                flush_core_in.wr_addr <= addr(LINE_RANGE);
+                mgm_core_in.wr_addr <= addr(LINE_RANGE);
 
             when IDLE => 
-                flush_busy <= false;
-                flush_core_in <= pipe_core_in;
-                flush_core_in.rd_addr <= flush_line_ix;
+                mgm_busy <= false;
+                mgm_core_in <= pipe_core_in;
+                mgm_core_in.rd_addr <= mgm_line_ix;
                 
 
                 if start_end_same_tag then
-                    flush_core_in.rd_addr <= flush_start(LINE_RANGE);
+                    mgm_core_in.rd_addr <= mgm_start(LINE_RANGE);
                 end if;
 
                 
                 
-            when SCANNING => 
+            when ITERATING => 
                 if not writeback_busy then
-                    flush_core_in.rd_addr <= next_flush_line_ix_int;
-                    flush_core_in.mgmt_addr <= next_flush_line_ix_int;
+                    mgm_core_in.rd_addr <= next_mgm_line_ix_int;
+                    mgm_core_in.mgmt_addr <= next_mgm_line_ix_int;
                 else
-                    flush_core_in.rd_addr <= flush_line_ix;
-                    flush_core_in.mgmt_addr <= flush_line_ix;
+                    mgm_core_in.rd_addr <= mgm_line_ix;
+                    mgm_core_in.mgmt_addr <= mgm_line_ix;
                 end if;
 
-                
-
-                if line_valid = '1' and line_in_flush_range and line_is_dirty then
-                    flush_core_in.dirties_wr <= '1';
-                    flush_core_in.mgmt_addr <= flush_line_ix;
-                    req_writeback <= true;
-                    flush_stall <= true;
-                end if;
-
-                if line_valid = '1' and line_in_flush_range and inval then
-                    flush_core_in.mgmt_wr <= '1';
-                    flush_core_in.mgmt_addr <= flush_line_ix;
-                end if;
+                case mgm_ctrl is
+                    when nop => assert false report "cache control mode went to idle prior to action finish!" severity failure;
+                    when flush => -- write back changed data to memory 
+                        if line_valid = '1' and line_in_mgm_range and line_is_dirty and mgm_ctrl = flush then
+                            mgm_core_in.dirties_wr <= '1';
+                            mgm_core_in.mgmt_addr <= mgm_line_ix;
+                            req_writeback <= true;
+                            mgm_stall <= true;
+                        end if;
+                    when inval => -- remove a line from the cache
+                        if line_valid = '1' and line_in_mgm_range then
+                            mgm_core_in.mgmt_wr <= '1';
+                            mgm_core_in.mgmt_addr <= mgm_line_ix;
+                        end if;
+                end case;
             
             when RESTORE_PIPE_ADDR => 
-                flush_core_in.mgmt_addr <= next_addr(LINE_RANGE);
-                flush_core_in.rd_addr <= next_addr(LINE_RANGE);
+                mgm_core_in.mgmt_addr <= next_addr(LINE_RANGE);
+                mgm_core_in.rd_addr <= next_addr(LINE_RANGE);
 
             when DONE => 
-                flush_core_in.mgmt_addr <= next_addr(LINE_RANGE);
-                flush_core_in.rd_addr <= next_addr(LINE_RANGE);
-                flush_busy <= false;
-                flush_wait_release <= true;
+                mgm_core_in.mgmt_addr <= next_addr(LINE_RANGE);
+                mgm_core_in.rd_addr <= next_addr(LINE_RANGE);
+                mgm_busy <= false;
+                mgmt_wait_release <= true;
         end case;
 
-        next_flush_line_ix <= next_flush_line_ix_int;
-        flush_line <= flush_line_ix;
-    end process flush_unit_output_p;
+        next_mgm_line_ix <= next_mgm_line_ix_int;
+        mgm_line <= mgm_line_ix;
+    end process mgm_unit_output_p;
 END ARCHITECTURE behav;
