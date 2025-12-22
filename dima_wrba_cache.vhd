@@ -3,17 +3,20 @@ USE ieee.std_logic_1164.all;
 use IEEE.math_real.all;
 use ieee.numeric_std.all;
 
-LIBRARY better_generic_cache_lib;
-USE better_generic_cache_lib.generic_caches.all;
+LIBRARY generic_cache_lib;
+USE generic_cache_lib.generic_caches.all;
 
 ENTITY dima_wrba_cache IS
     GENERIC(
-        WORDS_IN_LINE: positive := 8;
-        LINES: positive := 8;
+        ADDR_WIDTH: positive := 32;
         DATA_WIDTH: positive := 32;
 
+        WORDS_IN_LINE: positive := 8;
+        LINES: positive := 8;
+        BUS_WIDTH: positive := 256;
+
         BACKGROUND_FLUSHES: boolean := false;
-        REPORT_IF_MISUSE: boolean := true;
+        REPORT_IF_MISUSE: boolean := true
     );
     PORT(
         clk, res_n              : IN std_logic;
@@ -31,7 +34,8 @@ ENTITY dima_wrba_cache IS
         
 
         -- management interface
-        mgm_ctrl                : IN ctrl_mode_T;
+        mgm_flush               : IN boolean;
+        mgm_inval               : IN boolean;
         mgm_start               : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '0');
         mgm_end                 : IN std_logic_vector(ADDR_WIDTH - 1 downto 0) := (others => '1');
         mgm_active              : OUT boolean;
@@ -50,15 +54,7 @@ ENTITY dima_wrba_cache IS
         wack                    : IN boolean := false;
         waddr                   : OUT std_logic_vector(ADDR_WIDTH - 1 downto 0);
         wdata                   : OUT std_logic_vector(BUS_WIDTH - 1 downto 0);
-        wbyte_ena               : OUT std_logic_vector(BUS_WIDTH/8 - 1 downto 0);
-
-        -- debug
-        save_cdata              : OUT boolean;
-        wr_line                 : OUT std_logic_vector(3 downto 0);
-        rd_line                 : OUT std_logic_vector(3 downto 0);
-        mgm_line                : OUT std_logic_vector(3 downto 0);
-        bens                    : OUT STD_LOGIC_VECTOR(63 downto 0);
-        fd                      : OUT STD_LOGIC_VECTOR(63 downto 0)
+        wbyte_ena               : OUT std_logic_vector(BUS_WIDTH/8 - 1 downto 0)
 
     );
 END ENTITY dima_wrba_cache;
@@ -77,7 +73,9 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     constant Q_LOG: integer := maxOf2(integer(ceil(log2(real(BUS_WIDTH) / real(WORDS_IN_LINE * DATA_WIDTH)))), 0);  
     constant WORDS_PER_BUS: positive := BUS_WIDTH / DATA_WIDTH;
     constant WORDS_PER_BUS_LOG: natural := integer(ceil(log2(real(WORDS_PER_BUS))));
-    
+    constant BYTES_PER_BUS_WORD: natural := BUS_WIDTH / BYTE_SIZE;
+    constant BYTES_PER_BUS_WORD_LOG: natural := integer(ceil(log2(real(BYTES_PER_BUS_WORD))));
+
     constant ZERO_BYTE_ADDR: std_logic_vector(ADDR_WIDTH_WORD - 1 downto 0) := (others => '0');
     constant ZERO_BUS_ADDR: std_logic_vector(WORDS_PER_BUS_LOG - 1 downto 0)  := (others => '0');
 
@@ -368,13 +366,6 @@ BEGIN
         end process core_memory_bena_p;
     end generate;
     
-    debug_flineout_p: process(all) is
-        begin
-            for i in 7 downto 0 loop 
-                fd(8*i+7 downto 8*i) <= core_rdata(i);
-            end loop;
-        end process debug_flineout_p;
-    
 
     line_tag_selected <= core_rmgmt(TAG_WIDTH - 1 downto 0);
     line_valid <= core_rmgmt(VALID_IN_MGMT);
@@ -406,25 +397,7 @@ BEGIN
         if fill_busy then
             core_access <= FILLU;
             writeback_line <= pipe_line;
-        else
-            case ctrl is
-                when rd | wr | rdwr => 
-                    if not line_hit then
-                        internal_stall := true;
-
-                        if line_is_dirty and line_valid = '1' then
-                            start_writeback <= true;
-                        end if;
-
-                        writeback_line <= pipe_line;
-                        core_access <= FILLU;
-                        start_fill <= true;
-                    end if;
-
-                when flush =>  
-            end case;
-        end if;
-        elsif not line_hit and (ctrl = rd or ctrl = wr or ctrl = rdwr) then 
+        elsif not line_hit and (rd or we) then 
             internal_stall := true;
 
             if line_is_dirty and line_valid = '1' then
@@ -434,7 +407,7 @@ BEGIN
             writeback_line <= pipe_line;
             core_access <= FILLU;
             start_fill <= true;
-        elsif ((mgm_ctrl /= nop and not mgmt_wait_release) or mgm_busy) then 
+        elsif (((mgm_flush or mgm_inval) and not mgmt_wait_release) or mgm_busy) then 
             core_access <= FLUSHU;
             start_mgm_op <= true;
             internal_stall := not mgmt_wait_release;
@@ -524,7 +497,7 @@ BEGIN
                 startup := true;
             else
                 if (clk'event and clk = '1') then  
-                    if (last_ix /= addr(LINE_RANGE) and (xtrl = rd or ctrl = wr or ctrl = rdwr)) and not startup then
+                    if (last_ix /= addr(LINE_RANGE) and (rd or we)) and not startup then
                         if_misuse_stall <= true;
                         assert false report "bad processor interface input" severity failure;
                     end if;
@@ -535,12 +508,12 @@ BEGIN
             end if;
         end process if_check_p;
         
-    else generate;
+    else generate
         if_misuse_stall <= false;
     end generate;
     iffault <= if_misuse_stall;
 
-    if_check_g : if DEBUG_MODE generate
+    if_check_g : if REPORT_IF_MISUSE generate
         -- synthesis off
         if_check: process(clk, res_n) is
             variable last_stall: boolean := false; 
@@ -934,7 +907,7 @@ end process fill_unit_output_p;
                     when RESTORE_PIPE_ADDR => 
                         mgm_state <= DONE;
                     when DONE => 
-                        if not flush then
+                        if not (mgm_flush or mgm_inval) then
                             mgm_state <= IDLE;
                         end if;
                 end case;
@@ -1010,21 +983,21 @@ end process fill_unit_output_p;
                     mgm_core_in.mgmt_addr <= mgm_line_ix;
                 end if;
 
-                case mgm_ctrl is
-                    when nop => assert false report "cache control mode went to idle prior to action finish!" severity failure;
-                    when flush => -- write back changed data to memory 
-                        if line_valid = '1' and line_in_mgm_range and line_is_dirty and mgm_ctrl = flush then
-                            mgm_core_in.dirties_wr <= '1';
-                            mgm_core_in.mgmt_addr <= mgm_line_ix;
-                            req_writeback <= true;
-                            mgm_stall <= true;
-                        end if;
-                    when inval => -- remove a line from the cache
-                        if line_valid = '1' and line_in_mgm_range then
-                            mgm_core_in.mgmt_wr <= '1';
-                            mgm_core_in.mgmt_addr <= mgm_line_ix;
-                        end if;
-                end case;
+                if mgm_flush then -- write back changed data to memory 
+                    if line_valid = '1' and line_in_mgm_range and line_is_dirty then
+                        mgm_core_in.dirties_wr <= '1';
+                        mgm_core_in.mgmt_addr <= mgm_line_ix;
+                        req_writeback <= true;
+                        mgm_stall <= true;
+                    end if;
+                end if;
+
+                if mgm_inval then -- remove a line from the cache
+                    if line_valid = '1' and line_in_mgm_range then
+                        mgm_core_in.mgmt_wr <= '1';
+                        mgm_core_in.mgmt_addr <= mgm_line_ix;
+                    end if;
+                end if;
             
             when RESTORE_PIPE_ADDR => 
                 mgm_core_in.mgmt_addr <= next_addr(LINE_RANGE);
