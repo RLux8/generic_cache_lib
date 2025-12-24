@@ -99,6 +99,7 @@ ARCHITECTURE behav OF generic_w_pipeline IS
 
     signal entry_is_all_bytes: boolean;
     signal keep_entry: boolean;
+    signal transaction_started: boolean;
 
     signal next_data_entirely_in_pipe: boolean;
     signal data_entirely_in_pipe: boolean;
@@ -114,6 +115,8 @@ ARCHITECTURE behav OF generic_w_pipeline IS
     signal coalesced_entry_q: std_logic_vector(write_pipe'range);
 
     signal content_probe_pipe_matches: std_logic_vector(write_pipe'range);
+
+    signal entry_fwd: boolean_vector(10 downto 0);
 BEGIN
     wp: if DEPTH = 0 generate
         -- if we dont have a write buffer at all, just pass the signals through
@@ -338,7 +341,7 @@ BEGIN
 
         -- we forward the second entry to circumvent the 2 cycle delay
         out_entry   <= write_pipe(0) when not (wack_m or coalescing_active) else next_write_pipe(0);
-        wreq_m      <= out_entry.valid and pipe_above_level and not keep_entry and not wack_m;
+        wreq_m      <= out_entry.valid and pipe_above_level and (not keep_entry or transaction_started) and not wack_m;
         waddr_m     <= out_entry.addr & ZERO_BUS_ADDR;
         wbyte_ena_m <= out_entry.bena;
         wdata_m     <= out_entry.data;
@@ -349,9 +352,16 @@ BEGIN
         begin
             if res_n /= '1' then
                 wack_c <= false;
+                transaction_started <= false;
             else
                 if (clk'event and clk = '1') then  
                     wack_c <= next_wack;
+
+                    if wreq_m then
+                        transaction_started <= true;
+                    elsif wack_m then
+                        transaction_started <= false;
+                    end if;
                 end if;
             end if;
         end process wack_delay_p;
@@ -373,15 +383,22 @@ BEGIN
             keep_entry <= false;
 
             for i in 0 to DEPTH - 1 loop 
-                if write_pipe(i).addr = last_raddr_c(BUS_WORD_ADDR) then 
-                    -- make sure we dont write a entry away which we want to read and might have acked already
-                    if i = 0 and rreq_c then
-                        keep_entry <= true;
-                    end if;
+                entry_fwd(i) <= false;
 
+                if write_pipe(i).addr = raddr_c(BUS_WORD_ADDR) then
                     if isAllStd(write_pipe(i).bena, '1') then
                         entry_is_all_bytes <= true;
                     end if;
+                end if;
+
+                if write_pipe(i).addr = last_raddr_c(BUS_WORD_ADDR) then 
+                    -- make sure we dont write a entry away which we want to read and might have acked already
+                    if i = 0 and rreq_c then
+                        keep_entry <= true;                  
+                    end if;
+                    entry_fwd(i) <= true;
+
+                    
 
                     for b in write_pipe(i).bena'range loop
                         if write_pipe(i).bena(b) = '1' then
