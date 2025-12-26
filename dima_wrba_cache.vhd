@@ -388,7 +388,7 @@ BEGIN
         core_access         <= PIPELINE;
         start_writeback     <= false;
         start_fill          <= false;
-        start_mgm_op         <= false;
+        start_mgm_op        <= false;
         internal_stall      := false;
 		writeback_line		<= (others => '0');
         stall_int           <= false;
@@ -397,6 +397,14 @@ BEGIN
         if fill_busy then
             core_access <= FILLU;
             writeback_line <= pipe_line;
+        elsif (((mgm_flush or mgm_inval) and not mgmt_wait_release) or mgm_busy) then 
+            core_access <= FLUSHU;
+            start_mgm_op <= true;
+            internal_stall := not mgmt_wait_release;
+            writeback_line <= mgm_line;
+            if req_writeback then
+                start_writeback <= true;
+            end if;
         elsif not line_hit and (rd or we) then 
             internal_stall := true;
 
@@ -407,14 +415,6 @@ BEGIN
             writeback_line <= pipe_line;
             core_access <= FILLU;
             start_fill <= true;
-        elsif (((mgm_flush or mgm_inval) and not mgmt_wait_release) or mgm_busy) then 
-            core_access <= FLUSHU;
-            start_mgm_op <= true;
-            internal_stall := not mgmt_wait_release;
-            writeback_line <= mgm_line;
-            if req_writeback then
-                start_writeback <= true;
-            end if;
         end if;
 
         stall_int <= (mgm_busy or mgm_stall or fill_busy or writeback_busy_q) or internal_stall or if_misuse_stall;

@@ -229,12 +229,12 @@ BEGIN
 
         -- core status
         pipe_full <= insert_index = DEPTH - 1;
-        pipe_empty <= insert_index = 0;
+        pipe_empty <= insert_index = 0 and not write_pipe(0).valid;
         pipe_above_level <= next_insert_index > RETENTION_LEVEL or flush_pipe;
 
         -- regular write entry insertion
         shift_pipe <= (wack_m or not write_pipe(0).valid) and not (keep_entry or pipe_empty);
-        insert_new_into_pipe <= wreq_c and not (pipe_full or (any_waddr_pipe_match and COALESCING));
+        insert_new_into_pipe <= wreq_c and not (pipe_full or (any_waddr_pipe_match and COALESCING)) and not flush_pipe;
 
         -- coalescing
         any_waddr_pipe_match <= not isAllStd(waddr_pipe_matches, '0');
