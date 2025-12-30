@@ -537,6 +537,7 @@ BEGIN
                         stall_next_addr := next_addr;
                     end if;
 
+
                     assert  not stall_int or stall_we = we report "WE CHANGED DURING STALL!" severity failure;
                     assert  not stall_int or stall_rd = rd report "RD CHANGED DURING STALL!" severity failure;
                     assert  not stall_int or stall_sd = sd or not we report "SD CHANGED DURING STALL!" severity failure;
