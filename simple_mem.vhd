@@ -1,5 +1,5 @@
 --
--- VHDL Architecture better_generic_cache_lib.simple_mem.behav
+-- VHDL Architecture generic_cache_lib.simple_mem.behav
 --
 -- Created:
 --          by - surfer.UNKNOWN (SURFER-A0000001)
@@ -12,8 +12,8 @@ USE ieee.std_logic_1164.all;
 use IEEE.math_real.all;
 use ieee.numeric_std.all;
 
-LIBRARY better_generic_cache_lib;
-USE better_generic_cache_lib.generic_caches.all;
+LIBRARY generic_cache_lib;
+USE generic_cache_lib.generic_caches.all;
 
 ENTITY simple_mem IS
   PORT(

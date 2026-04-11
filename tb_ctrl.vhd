@@ -4,8 +4,8 @@ use ieee.numeric_std.all;
 use ieee.math_real.uniform;
 use ieee.math_real.floor;
 
-LIBRARY better_generic_cache_lib;
-USE better_generic_cache_lib.generic_caches.all;
+LIBRARY generic_cache_lib;
+USE generic_cache_lib.generic_caches.all;
 
 ENTITY tb_ctrl IS
    PORT( 

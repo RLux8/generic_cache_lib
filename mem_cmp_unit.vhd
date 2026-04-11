@@ -1,8 +1,8 @@
 LIBRARY ieee;
 USE ieee.std_logic_1164.all;
 
-LIBRARY better_generic_cache_lib;
-USE better_generic_cache_lib.generic_caches.all;
+LIBRARY generic_cache_lib;
+USE generic_cache_lib.generic_caches.all;
 
 ENTITY mem_cmp_unit IS
    PORT( 

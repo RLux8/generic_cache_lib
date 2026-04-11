@@ -1,5 +1,5 @@
 --
--- VHDL Architecture better_generic_cache_lib.generic_w_pipeline.behav
+-- VHDL Architecture generic_cache_lib.generic_w_pipeline.behav
 --
 -- Created:
 --          by - surfer.UNKNOWN (SURFER-A0000001)
