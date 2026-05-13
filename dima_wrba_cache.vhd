@@ -8,15 +8,15 @@ USE generic_cache_lib.generic_caches.all;
 
 ENTITY dima_wrba_cache IS
     GENERIC(
-        ADDR_WIDTH: positive := 32;
-        DATA_WIDTH: positive := 32;
+        ADDR_WIDTH              : positive := 32;
+        DATA_WIDTH              : positive := 32;
 
-        WORDS_IN_LINE: positive := 8;
-        LINES: positive := 8;
-        BUS_WIDTH: positive := 256;
+        WORDS_IN_LINE           : positive := 8;
+        LINES                   : positive := 8;
+        BUS_WIDTH               : positive := 256;
 
-        BACKGROUND_FLUSHES: boolean := false;
-        REPORT_IF_MISUSE: boolean := true
+        BACKGROUND_FLUSHES      : boolean := false;
+        IF_MISUSE_SENSITIVITY   : natural := 2
     );
     PORT(
         clk, res_n              : IN std_logic;
@@ -486,7 +486,7 @@ BEGIN
 
     pipe_line <= ADDR(LINE_RANGE);
 
-    imaybe_if_check: if REPORT_IF_MISUSE generate
+    imaybe_if_check: if IF_MISUSE_SENSITIVITY /= 0 generate
         if_check_p: process(clk, res_n) is
             variable last_ix: std_logic_vector(LINE_RANGE);
             variable startup: boolean;
@@ -513,7 +513,7 @@ BEGIN
     end generate;
     iffault <= if_misuse_stall;
 
-    if_check_g : if REPORT_IF_MISUSE generate
+    if_check_g : if IF_MISUSE_SENSITIVITY = 0 generate
         -- synthesis off
         if_check: process(clk, res_n) is
             variable last_stall: boolean := false; 
@@ -537,12 +537,12 @@ BEGIN
                         stall_next_addr := next_addr;
                     end if;
 
+                    assert IF_MISUSE_SENSITIVITY < 1 or not stall_int or stall_addr = addr          report "ADDR CHANGED DURING STALL!"     severity error;
+                    assert IF_MISUSE_SENSITIVITY < 2 or not stall_int or stall_we = we              report "WE CHANGED DURING STALL!"       severity error;
+                    assert IF_MISUSE_SENSITIVITY < 2 or not stall_int or stall_rd = rd              report "RD CHANGED DURING STALL!"       severity error;
+                    assert IF_MISUSE_SENSITIVITY < 3 or not stall_int or stall_sd = sd or not we    report "SD CHANGED DURING STALL!"       severity error;
+                    assert IF_MISUSE_SENSITIVITY < 3 or not stall_int or stall_byteena = byte_ena   report "BYTE ENA CHANGED DURING STALL!" severity error;
 
-                    assert  not stall_int or stall_we = we report "WE CHANGED DURING STALL!" severity failure;
-                    assert  not stall_int or stall_rd = rd report "RD CHANGED DURING STALL!" severity failure;
-                    assert  not stall_int or stall_sd = sd or not we report "SD CHANGED DURING STALL!" severity failure;
-                    assert  not stall_int or stall_byteena = byte_ena  report "BYTE ENA CHANGED DURING STALL!" severity failure;
-                    assert  not stall_int or stall_addr = addr  report "ADDR CHANGED DURING STALL!" severity failure;
                     last_stall := stall;
                 end if;
             end if;
