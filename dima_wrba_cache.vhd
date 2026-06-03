@@ -238,6 +238,7 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     signal probed_mgmt: mgmt_vector_T;
 
     signal if_misuse_stall: boolean;
+    signal read_data_bad: boolean;
 
 
     component simple_dual_port_ram is
@@ -481,35 +482,44 @@ BEGIN
                 ld(b * BYTE_SIZE + bit_i) <= tmp(bit_i);
             end loop;
         end loop;
+        
+        --synthesis off
+        if read_data_bad then
+            ld  <= (others => 'X');
+        end if;
+        --synthesis on
     end process;
 
 
     pipe_line <= ADDR(LINE_RANGE);
 
     imaybe_if_check: if IF_MISUSE_SENSITIVITY /= 0 generate
+        signal last_ix: std_logic_vector(LINE_RANGE);
+        signal startup: boolean;
+    begin
         if_check_p: process(clk, res_n) is
-            variable last_ix: std_logic_vector(LINE_RANGE);
-            variable startup: boolean;
         begin
             if res_n /= '1' then
                 if_misuse_stall <= false;
-                last_ix := (others => '0');
-                startup := true;
+                last_ix <= (others => '0');
+                startup <= true;
             else
                 if (clk'event and clk = '1') then  
                     if (last_ix /= addr(LINE_RANGE) and (rd or we)) and not startup then
-                        if_misuse_stall <= true;
-                        assert false report "bad processor interface input" severity failure;
+                        if IF_MISUSE_SENSITIVITY > 4 then
+                            if_misuse_stall <= true;
+                        end if;
                     end if;
 
-                    last_ix := next_addr(LINE_RANGE);
-                    startup := false;
+                    last_ix <= next_addr(LINE_RANGE);
+                    startup <= false;
                 end if;
             end if;
         end process if_check_p;
-        
+        read_data_bad <= (last_ix /= addr(LINE_RANGE) and (rd or we)) and not startup;
     else generate
         if_misuse_stall <= false;
+        read_data_bad   <= false;
     end generate;
     iffault <= if_misuse_stall;
 
@@ -562,9 +572,8 @@ BEGIN
 fill_unit_state_p: process(clk, res_n) is
 begin
     if res_n /= '1' then
-        line_fill_ctr           <= 0;
-        fill_state              <= IDLE;
-        last_used_line_fill_ctr <= 0;
+        line_fill_ctr   <= 0;
+        fill_state      <= IDLE;
     else
         if clk'event and clk = '1' then
             case fill_state is
