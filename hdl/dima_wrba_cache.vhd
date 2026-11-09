@@ -1002,6 +1002,7 @@ end process fill_unit_output_p;
                 if mgm_flush then -- write back changed data to memory 
                     if line_valid = '1' and line_in_mgm_range and line_is_dirty then
                         mgm_core_in.dirties_wr <= '1';
+                        mgm_core_in.wr_addr <= mgm_line_ix;     -- the dirties are written at wr_addr
                         mgm_core_in.mgmt_addr <= mgm_line_ix;
                         req_writeback <= true;
                         mgm_stall <= true;
