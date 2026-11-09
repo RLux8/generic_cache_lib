@@ -185,6 +185,7 @@ ARCHITECTURE behav OF dima_wrba_cache IS
     signal mgm_busy: boolean;
     signal fill_busy: boolean;
     signal mgm_stall: boolean;
+    signal mgm_line_written: boolean;    -- the management entry of the current line is written: re-read it
     signal writeback_busy: boolean;
     signal writeback_busy_q: boolean;
 
@@ -904,7 +905,7 @@ end process fill_unit_output_p;
                         mgm_state <= ITERATING; 
 
                     when ITERATING => 
-                        if not writeback_busy then
+                        if not writeback_busy and not mgm_line_written then
                             if not start_end_same_tag and unsigned(mgm_line_ix) = LINES - 1 then
                                 mgm_state <= RESTORE_PIPE_ADDR;
                                 mgm_line_ix <= (others => '0');
@@ -948,6 +949,7 @@ end process fill_unit_output_p;
         mgm_stall <= false;
         req_writeback <= false;
         mgmt_wait_release <= false;
+        mgm_line_written <= false;
 
         mgm_core_in <= ZERO_CORE_IN;
         
@@ -966,6 +968,7 @@ end process fill_unit_output_p;
             when WAIT_STORE => 
                 if start_end_same_tag then
                     mgm_core_in.rd_addr <= mgm_start(LINE_RANGE);
+                    mgm_core_in.mgmt_addr <= mgm_start(LINE_RANGE);
                 else
                     mgm_core_in.rd_addr <= mgm_line_ix;
                 end if;
@@ -977,10 +980,12 @@ end process fill_unit_output_p;
                 mgm_busy <= false;
                 mgm_core_in <= pipe_core_in;
                 mgm_core_in.rd_addr <= mgm_line_ix;
+                mgm_core_in.mgmt_addr <= mgm_line_ix;
                 
 
                 if start_end_same_tag then
                     mgm_core_in.rd_addr <= mgm_start(LINE_RANGE);
+                    mgm_core_in.mgmt_addr <= mgm_start(LINE_RANGE);
                 end if;
 
                 
@@ -1007,6 +1012,7 @@ end process fill_unit_output_p;
                     if line_valid = '1' and line_in_mgm_range then
                         mgm_core_in.mgmt_wr <= '1';
                         mgm_core_in.mgmt_addr <= mgm_line_ix;
+                        mgm_line_written <= true;
                     end if;
                 end if;
             
